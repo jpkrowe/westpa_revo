@@ -27,13 +27,7 @@ from revo_resampler import compute_distance_matrix, calc_variation
 
 log = logging.getLogger(__name__)
 
-FEATURE_NAMES = [
-    'Rg',
-    'Cterm_A', 'Cterm_B', 'Cterm_C',
-    'Nterm_A', 'Nterm_B', 'Nterm_C',
-    'Mid1', 'Mid2', 'Mid3',
-    'Nterm_sep', 'Cterm_sep', 'E2E',
-]
+FEATURE_NAMES = []
 
 
 class REVODriver(WEDriver):
