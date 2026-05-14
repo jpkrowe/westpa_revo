@@ -20,8 +20,6 @@ import numpy as np
 
 import westpa
 from westpa.core.we_driver import WEDriver
-from westpa.core.segment import Segment
-from westpa.core.states import InitialState
 
 from revo_resampler import compute_distance_matrix, calc_variation
 
