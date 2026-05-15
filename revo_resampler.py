@@ -11,12 +11,16 @@ Reference: Donyapour et al., J. Chem. Phys. 150, 244112 (2019)
 import numpy as np
 
 
-def compute_distance_matrix(features, sigmas=None):
+def compute_distance_matrix(features, importance=None, sigmas=None):
     """Compute pairwise Euclidean distance matrix with variance normalization.
 
     Parameters
     ----------
     features : ndarray, shape (n_walkers, n_features)
+    importance : ndarray, shape (n_features,), optional
+        Per-feature importance weights applied after normalization.
+        Scales each dimension's contribution to the distance.
+        If None, all features weighted equally (1.0).
     sigmas : ndarray, shape (n_features,), optional
         Per-feature standard deviations for normalization.
         If None, computed from the features.
@@ -29,10 +33,12 @@ def compute_distance_matrix(features, sigmas=None):
     if sigmas is None:
         sigmas = np.std(features, axis=0)
         sigmas[sigmas < 1e-12] = 1.0
-
+    
+    if importance is None:
+        importance = np.ones(features.shape[1])
     normed = features / sigmas
     diff = normed[:, np.newaxis, :] - normed[np.newaxis, :, :]
-    dist_matrix = np.sqrt(np.sum(diff ** 2, axis=2))
+    dist_matrix = np.sqrt(np.sum((diff ** 2) * importance[np.newaxis, np.newaxis, :], axis=2))
 
     return dist_matrix, sigmas
 

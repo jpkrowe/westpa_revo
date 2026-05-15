@@ -27,7 +27,6 @@ log = logging.getLogger(__name__)
 
 FEATURE_NAMES = []
 
-
 class REVODriver(WEDriver):
     """WESTPA WE driver implementing REVO diversity-optimizing resampling.
 
@@ -53,6 +52,8 @@ class REVODriver(WEDriver):
     USE_WEIGHTS = True
     MERGE_ALG = 'pairs'  # 'pairs' (wepy default): find pair minimizing variation loss
                          # 'greedy' (paper): lowest Vi first, then nearest neighbor
+    IMPORTANCE = None    # Vector that can be used to weight different features in the difference sum. Either None or same length as pcoord
+
 
     def _run_we(self):
         self._recycle_walkers()
@@ -76,7 +77,7 @@ class REVODriver(WEDriver):
                 continue
 
             # Distance matrix: computed once, fixed for the entire optimization
-            dist_matrix, sigmas = compute_distance_matrix(features)
+            dist_matrix, sigmas = compute_distance_matrix(features, self.IMPORTANCE)
             char_dist = dist_matrix[np.triu_indices(n_walkers, k=1)].mean()
             merge_dist = self.MERGE_DIST_FRACTION * char_dist
 
