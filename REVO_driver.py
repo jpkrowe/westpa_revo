@@ -52,7 +52,7 @@ class REVODriver(WEDriver):
     USE_WEIGHTS = True
     MERGE_ALG = 'pairs'  # 'pairs' (wepy default): find pair minimizing variation loss
                          # 'greedy' (paper): lowest Vi first, then nearest neighbor
-    IMPORTANCE = None    # Vector that can be used to weight different features in the difference sum. Either None or same length as pcoord
+    IMPORTANCE = None   # Vector that can be used to weight different features in the difference sum. Either None or same length as pcoord
 
 
     def _run_we(self):
@@ -99,12 +99,7 @@ class REVODriver(WEDriver):
                 vals = features[:, dim]
                 name = FEATURE_NAMES[dim] if dim < len(FEATURE_NAMES) else f"dim{dim}"
                 westpa.rc.pstatus(f"  {name}: {vals.min():.4f} / {vals.max():.4f}")
-            westpa.rc.pstatus("--- Weight stats ---")
-            westpa.rc.pstatus(f"  min: {weights.min():.4e}")
-            westpa.rc.pstatus(f"  max: {weights.max():.4e}")
-            westpa.rc.pstatus(f"  sum: {weights.sum():.6f}")
-            westpa.rc.pflush()
-
+            
             # === PLANNING PHASE ===
             merge_groups = [[] for _ in range(n_walkers)]
             n_ops = 0
@@ -225,6 +220,11 @@ class REVODriver(WEDriver):
             westpa.rc.pstatus(f"  Removed: {int((n_copies == 0).sum())}")
             westpa.rc.pstatus(f"  Unchanged: {int((n_copies == 1).sum())}")
             westpa.rc.pstatus(f"  Weight conservation: {w.sum():.6f}")
+            westpa.rc.pflush()
+            westpa.rc.pstatus("\n--- Post Optimisation Weight stats ---")
+            westpa.rc.pstatus(f"  min: {w.min():.4e}")
+            westpa.rc.pstatus(f"  max: {w.max():.4e}")
+            westpa.rc.pstatus(f"  sum: {w.sum():.6f}")
             westpa.rc.pflush()
 
             # === EXECUTION PHASE ===
