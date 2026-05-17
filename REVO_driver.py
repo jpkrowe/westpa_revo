@@ -52,7 +52,11 @@ class REVODriver(WEDriver):
     USE_WEIGHTS = True
     MERGE_ALG = 'pairs'  # 'pairs' (wepy default): find pair minimizing variation loss
                          # 'greedy' (paper): lowest Vi first, then nearest neighbor
-    IMPORTANCE = None   # Vector that can be used to weight different features in the difference sum. Either None or same length as pcoord
+    IMPORTANCE = None    # Per-feature importance weights for the distance sum. None = equal.
+    PCOORD_RANGES = None # Per-feature expected ranges for normalization, shape (n_features,).
+                         # If set, sigmas = PCOORD_RANGES instead of computing from ensemble std.
+                         # This prevents sigma oscillation between iterations.
+                         # Example: np.array([0.1, 2.0, 3.0, ...]) for 19 features.
 
 
     def _run_we(self):
@@ -76,8 +80,11 @@ class REVODriver(WEDriver):
                 westpa.rc.pstatus("REVO: All walkers identical, skipping")
                 continue
 
-            # Distance matrix: computed once, fixed for the entire optimization
-            dist_matrix, sigmas = compute_distance_matrix(features, self.IMPORTANCE)
+            # Distance matrix: computed once, fixed for the entire optimization.
+            # If PCOORD_RANGES is set, use it as fixed sigmas to prevent oscillation.
+            dist_matrix, sigmas = compute_distance_matrix(
+                features, self.IMPORTANCE, sigmas=self.PCOORD_RANGES
+            )
             char_dist = dist_matrix[np.triu_indices(n_walkers, k=1)].mean()
             merge_dist = self.MERGE_DIST_FRACTION * char_dist
 
