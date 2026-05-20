@@ -11,11 +11,18 @@ Register in west.cfg:
         module_path: $WEST_SIM_ROOT
         we_driver: REVO_driver.REVODriver
 
+Driver parameters are read from a YAML file. The default location is
+revo.cfg next to this module, or set REVO_CONFIG to point to a
+different file.
+
 Requires revo_resampler.py in the same directory.
 """
 
 import logging
 import operator
+import os
+from pathlib import Path
+
 import numpy as np
 
 import westpa
@@ -25,7 +32,66 @@ from revo_resampler import compute_distance_matrix, calc_variation
 
 log = logging.getLogger(__name__)
 
-FEATURE_NAMES = []
+DEFAULT_REVO_CONFIG = {
+    "pmin": 1e-12,
+    "pmax": 0.1,
+    "dist_exponent": 4,
+    "merge_dist_fraction": 0.5,
+    "use_weights": True,
+    "merge_alg": "pairs",
+    "importance": None,
+    "pcoord_ranges": None,
+}
+
+
+def _load_revo_config(config_path=None):
+    """Load REVO configuration from YAML and apply defaults."""
+    if config_path is None:
+        config_path = os.environ.get(
+            "REVO_CONFIG", Path(__file__).with_name("revo.cfg")
+        )
+
+    config_path = Path(config_path)
+    if not config_path.exists():
+        raise FileNotFoundError(
+            f"REVO configuration file not found: {config_path}. "
+            "Set REVO_CONFIG or create revo.cfg next to REVO_driver.py."
+        )
+
+    try:
+        import yaml
+    except ImportError as exc:
+        raise ImportError(
+            "PyYAML is required to load REVO configuration files. "
+            "Install the 'pyyaml' package to use revo.cfg."
+        ) from exc
+
+    with config_path.open("r", encoding="utf-8") as handle:
+        loaded = yaml.safe_load(handle) or {}
+
+    if not isinstance(loaded, dict):
+        raise ValueError(f"REVO configuration in {config_path} must be a YAML mapping.")
+
+    config = DEFAULT_REVO_CONFIG.copy()
+    config.update({key: value for key, value in loaded.items() if key in config})
+
+    feature_names = loaded.get("feature_names")
+    if not feature_names:
+        raise ValueError(
+            f"REVO configuration in {config_path} must define a non-empty 'feature_names' list."
+        )
+    if not isinstance(feature_names, (list, tuple)):
+        raise ValueError("'feature_names' must be a YAML list.")
+
+    config["feature_names"] = [str(name) for name in feature_names]
+
+    if config["importance"] is not None:
+        config["importance"] = np.asarray(config["importance"], dtype=float)
+    if config["pcoord_ranges"] is not None:
+        config["pcoord_ranges"] = np.asarray(config["pcoord_ranges"], dtype=float)
+
+    return config
+
 
 class REVODriver(WEDriver):
     """WESTPA WE driver implementing REVO diversity-optimizing resampling.
@@ -50,16 +116,36 @@ class REVODriver(WEDriver):
     DIST_EXPONENT = 4
     MERGE_DIST_FRACTION = 0.5
     USE_WEIGHTS = True
-    MERGE_ALG = 'pairs'  # 'pairs' (wepy default): find pair minimizing variation loss
-                         # 'greedy' (paper): lowest Vi first, then nearest neighbor
-    IMPORTANCE = None    # Per-feature importance weights for the distance sum. None = equal.
-    PCOORD_RANGES = None # Per-feature expected ranges for normalization, shape (n_features,).
-                         # If set, sigmas = PCOORD_RANGES instead of computing from ensemble std.
-                         # This prevents sigma oscillation between iterations.
-                         # Example: np.array([0.1, 2.0, 3.0, ...]) for 19 features.
+    MERGE_ALG = "pairs"  # 'pairs' (wepy default): find pair minimizing variation loss
+    # 'greedy' (paper): lowest Vi first, then nearest neighbor
+    IMPORTANCE = (
+        None  # Per-feature importance weights for the distance sum. None = equal.
+    )
+    PCOORD_RANGES = (
+        None  # Per-feature expected ranges for normalization, shape (n_features,).
+    )
+    # If set, sigmas = PCOORD_RANGES instead of computing from ensemble std.
+    # This prevents sigma oscillation between iterations.
+    # Example: np.array([0.1, 2.0, 3.0, ...]) for 19 features.
 
+    def _load_config(self):
+        if hasattr(self, "_revo_config"):
+            return self._revo_config
+
+        self._revo_config = _load_revo_config()
+        self.FEATURE_NAMES = self._revo_config["feature_names"]
+        self.PMIN = self._revo_config["pmin"]
+        self.PMAX = self._revo_config["pmax"]
+        self.DIST_EXPONENT = self._revo_config["dist_exponent"]
+        self.MERGE_DIST_FRACTION = self._revo_config["merge_dist_fraction"]
+        self.USE_WEIGHTS = self._revo_config["use_weights"]
+        self.MERGE_ALG = self._revo_config["merge_alg"]
+        self.IMPORTANCE = self._revo_config["importance"]
+        self.PCOORD_RANGES = self._revo_config["pcoord_ranges"]
+        return self._revo_config
 
     def _run_we(self):
+        self._load_config()
         self._recycle_walkers()
         self._check_pre()
 
@@ -67,8 +153,9 @@ class REVODriver(WEDriver):
             if len(bin) == 0:
                 continue
 
-            segments = np.array(sorted(bin, key=operator.attrgetter('weight')),
-                                dtype=np.object_)
+            segments = np.array(
+                sorted(bin, key=operator.attrgetter("weight")), dtype=np.object_
+            )
             n_walkers = len(segments)
             if n_walkers < 3:
                 continue
@@ -91,8 +178,13 @@ class REVODriver(WEDriver):
             n_copies = np.ones(n_walkers, dtype=int)
             w = weights.copy()
             variation, walker_vars = calc_variation(
-                w, n_copies, dist_matrix, char_dist,
-                self.DIST_EXPONENT, self.PMIN, self.USE_WEIGHTS
+                w,
+                n_copies,
+                dist_matrix,
+                char_dist,
+                self.DIST_EXPONENT,
+                self.PMIN,
+                self.USE_WEIGHTS,
             )
 
             # Log iteration stats
@@ -104,9 +196,13 @@ class REVODriver(WEDriver):
             westpa.rc.pstatus("--- Feature ranges (min / max) ---")
             for dim in range(features.shape[1]):
                 vals = features[:, dim]
-                name = FEATURE_NAMES[dim] if dim < len(FEATURE_NAMES) else f"dim{dim}"
+                name = (
+                    self.FEATURE_NAMES[dim]
+                    if dim < len(self.FEATURE_NAMES)
+                    else f"dim{dim}"
+                )
                 westpa.rc.pstatus(f"  {name}: {vals.min():.4f} / {vals.max():.4f}")
-            
+
             # === PLANNING PHASE ===
             merge_groups = [[] for _ in range(n_walkers)]
             n_ops = 0
@@ -132,7 +228,7 @@ class REVODriver(WEDriver):
                 m1_idx = None
                 m2_idx = None
 
-                if self.MERGE_ALG == 'pairs':
+                if self.MERGE_ALG == "pairs":
                     best_loss = np.inf
                     for i in range(n_walkers):
                         if i == clone_idx or n_copies[i] != 1:
@@ -144,7 +240,9 @@ class REVODriver(WEDriver):
                                 continue
                             if dist_matrix[i, j] >= merge_dist:
                                 continue
-                            v_loss = (w[j] * walker_vars[i] + w[i] * walker_vars[j]) / (w[i] + w[j])
+                            v_loss = (w[j] * walker_vars[i] + w[i] * walker_vars[j]) / (
+                                w[i] + w[j]
+                            )
                             if v_loss < best_loss:
                                 best_loss = v_loss
                                 m1_idx, m2_idx = i, j
@@ -185,8 +283,13 @@ class REVODriver(WEDriver):
                 n_copies[m2_idx] = w[m2_idx] / tempsum
 
                 test_var, _ = calc_variation(
-                    w, n_copies, dist_matrix, char_dist,
-                    self.DIST_EXPONENT, self.PMIN, self.USE_WEIGHTS
+                    w,
+                    n_copies,
+                    dist_matrix,
+                    char_dist,
+                    self.DIST_EXPONENT,
+                    self.PMIN,
+                    self.USE_WEIGHTS,
                 )
 
                 if test_var <= variation:
@@ -212,8 +315,13 @@ class REVODriver(WEDriver):
                 merge_groups[squash_idx] = []
 
                 variation, walker_vars = calc_variation(
-                    w, n_copies, dist_matrix, char_dist,
-                    self.DIST_EXPONENT, self.PMIN, self.USE_WEIGHTS
+                    w,
+                    n_copies,
+                    dist_matrix,
+                    char_dist,
+                    self.DIST_EXPONENT,
+                    self.PMIN,
+                    self.USE_WEIGHTS,
                 )
 
                 n_ops += 1
@@ -250,7 +358,7 @@ class REVODriver(WEDriver):
                 bin.difference_update(to_merge)
                 # Since we have already selected the 'keeper' walker according to the weights of the two walkers
                 # we want the merge to always select the keeper walker as the parent segment.
-                # To do this, we set the cumul_weight for all segments in the merge group to the total weight of the group, 
+                # To do this, we set the cumul_weight for all segments in the merge group to the total weight of the group,
                 # which ensures that the first segment (the keeper) is always selected as the parent.
                 glom, gparent = self._merge_walkers(to_merge, forced_cumul, bin)
                 bin.add(glom)
@@ -271,5 +379,5 @@ class REVODriver(WEDriver):
         self._check_post()
         self.new_weights = self.new_weights or []
 
-        log.debug('used initial states: {!r}'.format(self.used_initial_states))
-        log.debug('available initial states: {!r}'.format(self.avail_initial_states))
+        log.debug("used initial states: {!r}".format(self.used_initial_states))
+        log.debug("available initial states: {!r}".format(self.avail_initial_states))
