@@ -41,7 +41,6 @@ DEFAULT_REVO_CONFIG = {
     "merge_alg": "pairs",
     "char_dist": 1.0,
     "importance": None,
-    "pcoord_ranges": None,
 }
 
 
@@ -88,10 +87,21 @@ def _load_revo_config(config_path=None):
 
     if config["importance"] is not None:
         config["importance"] = np.asarray(config["importance"], dtype=float)
-    if config["pcoord_ranges"] is not None:
-        config["pcoord_ranges"] = np.asarray(config["pcoord_ranges"], dtype=float)
 
     return config
+
+
+def _sigma_from_ncpies(features, n_copies):
+    """Per-feature weighted std using n_copies as population weights.
+
+    Walkers with n_copies=0 are excluded; cloned walkers (n_copies=2)
+    count twice. Returns sigma >= 1e-8 to guard against collapsed features.
+    """
+    alive = n_copies > 0
+    wt = n_copies[alive] / n_copies[alive].sum()
+    mean = np.average(features[alive], weights=wt, axis=0)
+    var = np.average((features[alive] - mean) ** 2, weights=wt, axis=0)
+    return np.maximum(np.sqrt(var), 1e-8)
 
 
 class REVODriver(WEDriver):
@@ -122,13 +132,8 @@ class REVODriver(WEDriver):
     IMPORTANCE = (
         None  # Per-feature importance weights for the distance sum. None = equal.
     )
-    PCOORD_RANGES = (
-        None  # Per-feature expected ranges for normalization, shape (n_features,).
-    )
-    # If set, sigmas = PCOORD_RANGES instead of computing from ensemble std.
-    # This prevents sigma oscillation between iterations.
-    # Example: np.array([0.1, 2.0, 3.0, ...]) for 19 features.
-
+    CHAR_DIST = 1.0
+        
     def _load_config(self):
         if hasattr(self, "_revo_config"):
             return self._revo_config
@@ -142,7 +147,6 @@ class REVODriver(WEDriver):
         self.USE_WEIGHTS = self._revo_config["use_weights"]
         self.MERGE_ALG = self._revo_config["merge_alg"]
         self.IMPORTANCE = self._revo_config["importance"]
-        self.PCOORD_RANGES = self._revo_config["pcoord_ranges"]
         self.CHAR_DIST = self._revo_config["char_dist"]
         return self._revo_config
 
@@ -169,10 +173,11 @@ class REVODriver(WEDriver):
                 westpa.rc.pstatus("REVO: All walkers identical, skipping")
                 continue
 
-            # Distance matrix: computed once, fixed for the entire optimization.
-            # If PCOORD_RANGES is set, use it as fixed sigmas to prevent oscillation.
+            # Distance matrix: recomputed after each accepted clone/merge so sigma
+            # tracks the evolving planned ensemble rather than the pre-planning one.
+            sigmas = _sigma_from_ncpies(features, np.ones(n_walkers))
             dist_matrix, sigmas = compute_distance_matrix(
-                features, self.IMPORTANCE, sigmas=self.PCOORD_RANGES
+                features, self.IMPORTANCE, sigmas=sigmas
             )
             mean_dist = dist_matrix[np.triu_indices(n_walkers, k=1)].mean()
             merge_dist = self.MERGE_DIST_FRACTION * mean_dist
@@ -195,7 +200,7 @@ class REVODriver(WEDriver):
             westpa.rc.pstatus(f"Mean distance: {mean_dist:.4f}")
             westpa.rc.pstatus(f"Merge distance: {merge_dist:.4f}")
             westpa.rc.pstatus(f"Initial variation: {variation:.4e}")
-            westpa.rc.pstatus("--- Feature ranges (min / max) ---")
+            westpa.rc.pstatus("--- Feature ranges (min / max / sigma / r_s) ---")
             for dim in range(features.shape[1]):
                 vals = features[:, dim]
                 name = (
@@ -203,7 +208,12 @@ class REVODriver(WEDriver):
                     if dim < len(self.FEATURE_NAMES)
                     else f"dim{dim}"
                 )
-                westpa.rc.pstatus(f"  {name}: {vals.min():.4f} / {vals.max():.4f}")
+                s = sigmas[dim]
+                rng = vals.max() - vals.min()
+                westpa.rc.pstatus(
+                    f"  {name}: {vals.min():.4f} / {vals.max():.4f}"
+                    f"  sigma={s:.4f}  r/s={rng/s:.2f}"
+                )
 
             # === PLANNING PHASE ===
             merge_groups = [[] for _ in range(n_walkers)]
@@ -315,6 +325,14 @@ class REVODriver(WEDriver):
                 merge_groups[keep_idx].append(squash_idx)
                 merge_groups[keep_idx].extend(merge_groups[squash_idx])
                 merge_groups[squash_idx] = []
+
+                # Sigma and distance matrix updated to reflect the new planned ensemble.
+                sigmas = _sigma_from_ncpies(features, n_copies)
+                dist_matrix, _ = compute_distance_matrix(
+                    features, self.IMPORTANCE, sigmas=sigmas
+                )
+                mean_dist = dist_matrix[np.triu_indices(n_walkers, k=1)].mean()
+                merge_dist = self.MERGE_DIST_FRACTION * mean_dist
 
                 variation, walker_vars = calc_variation(
                     w,
