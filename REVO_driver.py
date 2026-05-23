@@ -39,6 +39,7 @@ DEFAULT_REVO_CONFIG = {
     "merge_dist_fraction": 0.5,
     "use_weights": True,
     "merge_alg": "pairs",
+    "char_dist": 1.0,
     "importance": None,
     "pcoord_ranges": None,
 }
@@ -142,6 +143,7 @@ class REVODriver(WEDriver):
         self.MERGE_ALG = self._revo_config["merge_alg"]
         self.IMPORTANCE = self._revo_config["importance"]
         self.PCOORD_RANGES = self._revo_config["pcoord_ranges"]
+        self.CHAR_DIST = self._revo_config["char_dist"]
         return self._revo_config
 
     def _run_we(self):
@@ -172,8 +174,8 @@ class REVODriver(WEDriver):
             dist_matrix, sigmas = compute_distance_matrix(
                 features, self.IMPORTANCE, sigmas=self.PCOORD_RANGES
             )
-            char_dist = dist_matrix[np.triu_indices(n_walkers, k=1)].mean()
-            merge_dist = self.MERGE_DIST_FRACTION * char_dist
+            mean_dist = dist_matrix[np.triu_indices(n_walkers, k=1)].mean()
+            merge_dist = self.MERGE_DIST_FRACTION * mean_dist
 
             n_copies = np.ones(n_walkers, dtype=int)
             w = weights.copy()
@@ -181,7 +183,7 @@ class REVODriver(WEDriver):
                 w,
                 n_copies,
                 dist_matrix,
-                char_dist,
+                self.CHAR_DIST,
                 self.DIST_EXPONENT,
                 self.PMIN,
                 self.USE_WEIGHTS,
@@ -190,7 +192,7 @@ class REVODriver(WEDriver):
             # Log iteration stats
             westpa.rc.pstatus("\n========== REVO ITERATION STATS ==========")
             westpa.rc.pstatus(f"Walkers: {n_walkers}")
-            westpa.rc.pstatus(f"Char distance: {char_dist:.4f}")
+            westpa.rc.pstatus(f"Mean distance: {mean_dist:.4f}")
             westpa.rc.pstatus(f"Merge distance: {merge_dist:.4f}")
             westpa.rc.pstatus(f"Initial variation: {variation:.4e}")
             westpa.rc.pstatus("--- Feature ranges (min / max) ---")
@@ -286,7 +288,7 @@ class REVODriver(WEDriver):
                     w,
                     n_copies,
                     dist_matrix,
-                    char_dist,
+                    self.CHAR_DIST,
                     self.DIST_EXPONENT,
                     self.PMIN,
                     self.USE_WEIGHTS,
@@ -318,7 +320,7 @@ class REVODriver(WEDriver):
                     w,
                     n_copies,
                     dist_matrix,
-                    char_dist,
+                    self.CHAR_DIST,
                     self.DIST_EXPONENT,
                     self.PMIN,
                     self.USE_WEIGHTS,
