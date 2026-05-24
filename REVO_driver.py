@@ -15,7 +15,7 @@ Driver parameters are read from a YAML file. The default location is
 revo.cfg next to this module, or set REVO_CONFIG to point to a
 different file.
 
-Requires revo_resampler.py in the same directory.
+Requires revo_resampler.py and revo_distance.py in the same directory.
 """
 
 import logging
@@ -28,7 +28,8 @@ import numpy as np
 import westpa
 from westpa.core.we_driver import WEDriver
 
-from revo_resampler import compute_distance_matrix, calc_variation
+from revo_resampler import calc_variation
+from revo_distance import _make_distance_metric
 
 log = logging.getLogger(__name__)
 
@@ -41,6 +42,10 @@ DEFAULT_REVO_CONFIG = {
     "merge_alg": "pairs",
     "char_dist": 1.0,
     "importance": None,
+    "distance_metric": "adaptive_sigma",
+    "sigma_update_rate": 0.1,
+    "sigma_state_file": "revo_sigma_state.npy",
+    "sigma_fixed": None,
 }
 
 
@@ -91,25 +96,14 @@ def _load_revo_config(config_path=None):
     return config
 
 
-def _sigma_from_ncpies(features, n_copies):
-    """Per-feature weighted std using n_copies as population weights.
-
-    Walkers with n_copies=0 are excluded; cloned walkers (n_copies=2)
-    count twice. Returns sigma >= 1e-8 to guard against collapsed features.
-    """
-    alive = n_copies > 0
-    wt = n_copies[alive] / n_copies[alive].sum()
-    mean = np.average(features[alive], weights=wt, axis=0)
-    var = np.average((features[alive] - mean) ** 2, weights=wt, axis=0)
-    return np.maximum(np.sqrt(var), 1e-8)
-
-
 class REVODriver(WEDriver):
     """WESTPA WE driver implementing REVO diversity-optimizing resampling.
 
-    Planning phase: greedy REVO on a fixed distance matrix. Modifies only
-    weights, n_copies, and merge_groups (bookkeeping). Variation is
-    recomputed each step with updated bookkeeping.
+    Planning phase: greedy REVO on a fixed distance matrix. The distance
+    matrix is computed once at the start of each iteration via the
+    configured DistanceMetric and held fixed throughout the planning loop.
+    This ensures the acceptance test and post-move bookkeeping are on the
+    same metric scale.
 
     Execution phase: one _merge_walkers call per keeper group with
     forced cumul_weight to guarantee the planned keeper is selected.
@@ -127,13 +121,9 @@ class REVODriver(WEDriver):
     DIST_EXPONENT = 4
     MERGE_DIST_FRACTION = 0.5
     USE_WEIGHTS = True
-    MERGE_ALG = "pairs"  # 'pairs' (wepy default): find pair minimizing variation loss
-    # 'greedy' (paper): lowest Vi first, then nearest neighbor
-    IMPORTANCE = (
-        None  # Per-feature importance weights for the distance sum. None = equal.
-    )
+    MERGE_ALG = "pairs"
     CHAR_DIST = 1.0
-        
+
     def _load_config(self):
         if hasattr(self, "_revo_config"):
             return self._revo_config
@@ -146,8 +136,17 @@ class REVODriver(WEDriver):
         self.MERGE_DIST_FRACTION = self._revo_config["merge_dist_fraction"]
         self.USE_WEIGHTS = self._revo_config["use_weights"]
         self.MERGE_ALG = self._revo_config["merge_alg"]
-        self.IMPORTANCE = self._revo_config["importance"]
         self.CHAR_DIST = self._revo_config["char_dist"]
+
+        self.distance_metric = _make_distance_metric(
+            self._revo_config["distance_metric"], self._revo_config
+        )
+        state_file_name = self._revo_config["sigma_state_file"]
+        self._sigma_state_file = (
+            Path(os.environ.get("WEST_SIM_ROOT", ".")) / state_file_name
+        )
+        self.distance_metric.load(self._sigma_state_file)
+
         return self._revo_config
 
     def _run_we(self):
@@ -173,16 +172,14 @@ class REVODriver(WEDriver):
                 westpa.rc.pstatus("REVO: All walkers identical, skipping")
                 continue
 
-            # Distance matrix: recomputed after each accepted clone/merge so sigma
-            # tracks the evolving planned ensemble rather than the pre-planning one.
-            sigmas = _sigma_from_ncpies(features, np.ones(n_walkers))
-            dist_matrix, sigmas = compute_distance_matrix(
-                features, self.IMPORTANCE, sigmas=sigmas
-            )
+            # Fixed distance matrix for the entire iteration.
+            # Both the test step and post-move bookkeeping use this same
+            # matrix, so the acceptance criterion is on a consistent scale.
+            n_copies = np.ones(n_walkers, dtype=int)
+            dist_matrix = self.distance_metric.compute(features, n_copies)
             mean_dist = dist_matrix[np.triu_indices(n_walkers, k=1)].mean()
             merge_dist = self.MERGE_DIST_FRACTION * mean_dist
 
-            n_copies = np.ones(n_walkers, dtype=int)
             w = weights.copy()
             variation, walker_vars = calc_variation(
                 w,
@@ -197,23 +194,37 @@ class REVODriver(WEDriver):
             # Log iteration stats
             westpa.rc.pstatus("\n========== REVO ITERATION STATS ==========")
             westpa.rc.pstatus(f"Walkers: {n_walkers}")
+            westpa.rc.pstatus(f"Distance metric: {type(self.distance_metric).__name__}")
             westpa.rc.pstatus(f"Mean distance: {mean_dist:.4f}")
             westpa.rc.pstatus(f"Merge distance: {merge_dist:.4f}")
             westpa.rc.pstatus(f"Initial variation: {variation:.4e}")
-            westpa.rc.pstatus("--- Feature ranges (min / max / sigma / r_s) ---")
-            for dim in range(features.shape[1]):
-                vals = features[:, dim]
-                name = (
-                    self.FEATURE_NAMES[dim]
-                    if dim < len(self.FEATURE_NAMES)
-                    else f"dim{dim}"
-                )
-                s = sigmas[dim]
-                rng = vals.max() - vals.min()
-                westpa.rc.pstatus(
-                    f"  {name}: {vals.min():.4f} / {vals.max():.4f}"
-                    f"  sigma={s:.4f}  r/s={rng/s:.2f}"
-                )
+
+            sigma = self.distance_metric.sigma
+            if sigma is not None:
+                westpa.rc.pstatus("--- Feature ranges (min / max / sigma / r_s) ---")
+                for dim in range(features.shape[1]):
+                    vals = features[:, dim]
+                    name = (
+                        self.FEATURE_NAMES[dim]
+                        if dim < len(self.FEATURE_NAMES)
+                        else f"dim{dim}"
+                    )
+                    s = sigma[dim]
+                    rng = vals.max() - vals.min()
+                    westpa.rc.pstatus(
+                        f"  {name}: {vals.min():.4f} / {vals.max():.4f}"
+                        f"  sigma={s:.4f}  r/s={rng/s:.2f}"
+                    )
+            else:
+                westpa.rc.pstatus("--- Feature ranges (min / max) ---")
+                for dim in range(features.shape[1]):
+                    vals = features[:, dim]
+                    name = (
+                        self.FEATURE_NAMES[dim]
+                        if dim < len(self.FEATURE_NAMES)
+                        else f"dim{dim}"
+                    )
+                    westpa.rc.pstatus(f"  {name}: {vals.min():.4f} / {vals.max():.4f}")
 
             # === PLANNING PHASE ===
             merge_groups = [[] for _ in range(n_walkers)]
@@ -284,9 +295,8 @@ class REVODriver(WEDriver):
                 if m1_idx is None or m2_idx is None:
                     break
 
-                # Test with probability-weighted n_copies (expected variation)
+                # Test: does this move increase variation on the fixed metric?
                 old_copies = n_copies.copy()
-                old_w = w.copy()
 
                 n_copies = n_copies.astype(float)
                 n_copies[clone_idx] += 1
@@ -306,10 +316,9 @@ class REVODriver(WEDriver):
 
                 if test_var <= variation:
                     n_copies = old_copies
-                    w = old_w
                     break
 
-                # Accepted: random keeper selection
+                # Accepted: random keeper selection weighted by current weight
                 n_copies = old_copies.copy()
                 n_copies[clone_idx] += 1
 
@@ -325,14 +334,6 @@ class REVODriver(WEDriver):
                 merge_groups[keep_idx].append(squash_idx)
                 merge_groups[keep_idx].extend(merge_groups[squash_idx])
                 merge_groups[squash_idx] = []
-
-                # Sigma and distance matrix updated to reflect the new planned ensemble.
-                sigmas = _sigma_from_ncpies(features, n_copies)
-                dist_matrix, _ = compute_distance_matrix(
-                    features, self.IMPORTANCE, sigmas=sigmas
-                )
-                mean_dist = dist_matrix[np.triu_indices(n_walkers, k=1)].mean()
-                merge_dist = self.MERGE_DIST_FRACTION * mean_dist
 
                 variation, walker_vars = calc_variation(
                     w,
@@ -362,6 +363,12 @@ class REVODriver(WEDriver):
             westpa.rc.pstatus(f"  sum: {w.sum():.6f}")
             westpa.rc.pflush()
 
+            # Update distance metric from the post-planning ensemble and
+            # persist state so it survives WESTPA restarts.
+            n_copies = n_copies.astype(int)
+            self.distance_metric.update(features, n_copies)
+            self.distance_metric.save(self._sigma_state_file)
+
             # === EXECUTION PHASE ===
             # One _merge_walkers call per keeper group. forced_cumul ensures
             # the planned keeper (index 0 in the segment list) is selected.
@@ -370,16 +377,11 @@ class REVODriver(WEDriver):
                 squash_list = merge_groups[keep_i]
                 if len(squash_list) == 0:
                     continue
-                # to_merge is a list per segment that describes the segments that will be merged into that segment
                 to_merge = [segments[keep_i]] + [segments[si] for si in squash_list]
                 total_w = sum(s.weight for s in to_merge)
                 forced_cumul = np.full(len(to_merge), total_w)
 
                 bin.difference_update(to_merge)
-                # Since we have already selected the 'keeper' walker according to the weights of the two walkers
-                # we want the merge to always select the keeper walker as the parent segment.
-                # To do this, we set the cumul_weight for all segments in the merge group to the total weight of the group,
-                # which ensures that the first segment (the keeper) is always selected as the parent.
                 glom, gparent = self._merge_walkers(to_merge, forced_cumul, bin)
                 bin.add(glom)
                 glom_refs[keep_i] = glom
