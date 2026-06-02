@@ -80,15 +80,13 @@ def _load_revo_config(config_path=None):
     config = DEFAULT_REVO_CONFIG.copy()
     config.update({key: value for key, value in loaded.items() if key in config})
 
-    feature_names = loaded.get("feature_names")
-    if not feature_names:
-        raise ValueError(
-            f"REVO configuration in {config_path} must define a non-empty 'feature_names' list."
-        )
-    if not isinstance(feature_names, (list, tuple)):
-        raise ValueError("'feature_names' must be a YAML list.")
-
-    config["feature_names"] = [str(name) for name in feature_names]
+    log_feature_names = loaded.get("log_feature_names")
+    if log_feature_names is not None:
+        if not isinstance(log_feature_names, dict):
+            raise ValueError("'log_feature_names' must be a YAML mapping of index: label.")
+        config["log_feature_names"] = {int(k): str(v) for k, v in log_feature_names.items()}
+    else:
+        config["log_feature_names"] = {}
 
     if config["importance"] is not None:
         config["importance"] = np.asarray(config["importance"], dtype=float)
@@ -129,7 +127,7 @@ class REVODriver(WEDriver):
             return self._revo_config
 
         self._revo_config = _load_revo_config()
-        self.FEATURE_NAMES = self._revo_config["feature_names"]
+        self.LOG_FEATURE_NAMES = self._revo_config["log_feature_names"]
         self.PMIN = self._revo_config["pmin"]
         self.PMAX = self._revo_config["pmax"]
         self.DIST_EXPONENT = self._revo_config["dist_exponent"]
@@ -200,31 +198,22 @@ class REVODriver(WEDriver):
             westpa.rc.pstatus(f"Initial variation: {variation:.4e}")
 
             sigma = self.distance_metric.sigma
-            if sigma is not None:
-                westpa.rc.pstatus("--- Feature ranges (min / max / sigma / r_s) ---")
-                for dim in range(features.shape[1]):
-                    vals = features[:, dim]
-                    name = (
-                        self.FEATURE_NAMES[dim]
-                        if dim < len(self.FEATURE_NAMES)
-                        else f"dim{dim}"
-                    )
-                    s = sigma[dim]
-                    rng = vals.max() - vals.min()
-                    westpa.rc.pstatus(
-                        f"  {name}: {vals.min():.4f} / {vals.max():.4f}"
-                        f"  sigma={s:.4f}  r/s={rng/s:.2f}"
-                    )
-            else:
-                westpa.rc.pstatus("--- Feature ranges (min / max) ---")
-                for dim in range(features.shape[1]):
-                    vals = features[:, dim]
-                    name = (
-                        self.FEATURE_NAMES[dim]
-                        if dim < len(self.FEATURE_NAMES)
-                        else f"dim{dim}"
-                    )
-                    westpa.rc.pstatus(f"  {name}: {vals.min():.4f} / {vals.max():.4f}")
+            if self.LOG_FEATURE_NAMES:
+                if sigma is not None:
+                    westpa.rc.pstatus("--- Feature ranges (min / max / sigma / r_s) ---")
+                    for dim, name in sorted(self.LOG_FEATURE_NAMES.items()):
+                        vals = features[:, dim]
+                        s = sigma[dim]
+                        rng = vals.max() - vals.min()
+                        westpa.rc.pstatus(
+                            f"  [{dim}] {name}: {vals.min():.4f} / {vals.max():.4f}"
+                            f"  sigma={s:.4f}  r/s={rng/s:.2f}"
+                        )
+                else:
+                    westpa.rc.pstatus("--- Feature ranges (min / max) ---")
+                    for dim, name in sorted(self.LOG_FEATURE_NAMES.items()):
+                        vals = features[:, dim]
+                        westpa.rc.pstatus(f"  [{dim}] {name}: {vals.min():.4f} / {vals.max():.4f}")
 
             # === PLANNING PHASE ===
             merge_groups = [[] for _ in range(n_walkers)]

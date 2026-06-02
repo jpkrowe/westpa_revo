@@ -36,14 +36,16 @@ Requires: `numpy`, `pyyaml`, and a working WESTPA installation.
 
 Driver parameters are read from a YAML file. By default the driver looks for `revo.cfg` next to `REVO_driver.py`. Point to a different file with the `REVO_CONFIG` environment variable.
 
-Only `feature_names` is required — everything else falls back to the defaults shown below.
+All parameters are optional and fall back to the defaults shown below.
 
 ```yaml
-# Names of the progress coordinate dimensions used as REVO features.
-# Must match the order and length of the pcoord returned by your propagator.
-feature_names:
-  - feature_0
-  - feature_1
+# --- Logging ---
+# Optional mapping of 0-based coordinate index to a display label.
+# Only the listed indices are printed in per-feature stats each iteration.
+# If omitted, no per-feature stats are printed.
+log_feature_names:
+  0: rmsd
+  4: radius_of_gyration
 
 # --- Algorithm parameters ---
 pmin: 1.0e-12          # minimum weight floor for the novelty function
