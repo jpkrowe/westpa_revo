@@ -105,25 +105,28 @@ Raw Euclidean distance with no normalization. Use when features are already on a
 Subclass `DistanceMetric` from `revo_distance.py` and override `compute()`. Optionally override `update()`, `save()`, and `load()` if your metric maintains state across iterations.
 
 ```python
+# my_distances.py
 from revo_distance import DistanceMetric
 
 class MyMetric(DistanceMetric):
+    def __init__(self, my_param=1.0, **kwargs):  # **kwargs absorbs unused config keys
+        self.my_param = my_param
+
     def compute(self, features, n_copies=None):
         # return ndarray of shape (n_walkers, n_walkers)
         ...
 ```
 
-Then instantiate it directly in a subclass of `REVODriver`:
+Point to it in `revo.cfg` using its fully-qualified class path. The full config dict is unpacked into `__init__` as keyword arguments, so any extra keys you add to `revo.cfg` are available to your class directly:
 
-```python
-from REVO_driver import REVODriver
-from my_metric import MyMetric
-
-class MyDriver(REVODriver):
-    def _load_config(self):
-        super()._load_config()
-        self.distance_metric = MyMetric()
+```yaml
+distance_metric: my_distances.MyMetric
+my_param: 2.5
 ```
+
+The module must be importable — place it in the same directory as `REVO_driver.py` (which is on `sys.path` by default) or install it as a package.
+
+> **Note:** `__init__` receives the entire `revo.cfg` dict as keyword arguments, including standard REVO keys like `pmin`, `char_dist`, etc. Add `**kwargs` to your signature to absorb any keys you do not use.
 
 ## Algorithm
 

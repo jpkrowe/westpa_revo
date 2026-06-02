@@ -24,8 +24,17 @@ built-in implementations:
     euclidean
         Raw Euclidean distance with no normalization. Use when features
         are already on a common scale or normalization is handled upstream.
+
+    custom class
+        Set 'distance_metric' to a fully-qualified class path, e.g.
+        'my_module.MyDistance'.  The class must subclass DistanceMetric and
+        its __init__ will be called with the full revo.cfg dict unpacked as
+        keyword arguments — declare only the keys you need and add **kwargs
+        to absorb the rest.  The module must be importable (i.e. on
+        PYTHONPATH or installed as a package).
 """
 
+import importlib
 from pathlib import Path
 
 import numpy as np
@@ -281,7 +290,12 @@ def _make_distance_metric(name, config):
     Parameters
     ----------
     name : str
-        One of 'adaptive_sigma', 'zscore', 'fixed', 'euclidean'.
+        One of the built-in names ('adaptive_sigma', 'zscore', 'fixed',
+        'euclidean') or a fully-qualified class path such as
+        'my_module.MyDistance'.  The class must be a subclass of
+        DistanceMetric.  It will be called with the full config dict
+        unpacked as keyword arguments, so declare only the keys you need
+        and add **kwargs to absorb the rest.
     config : dict
         REVO configuration dict (as returned by _load_revo_config).
 
@@ -310,7 +324,27 @@ def _make_distance_metric(name, config):
     elif name == "euclidean":
         return EuclideanDistance(importance=importance)
     else:
-        raise ValueError(
-            f"Unknown distance_metric '{name}'. "
-            "Choose from: adaptive_sigma, zscore, fixed, euclidean."
-        )
+        # Treat as a fully-qualified class path: 'my_module.MyDistance'
+        if "." not in name:
+            raise ValueError(
+                f"Unknown distance_metric '{name}'. "
+                "Use a built-in name (adaptive_sigma, zscore, fixed, euclidean) "
+                "or a fully-qualified class path such as 'my_module.MyDistance'."
+            )
+        module_path, class_name = name.rsplit(".", 1)
+        try:
+            module = importlib.import_module(module_path)
+        except ImportError as exc:
+            raise ImportError(
+                f"Could not import '{module_path}' for distance_metric '{name}': {exc}"
+            ) from exc
+        cls = getattr(module, class_name, None)
+        if cls is None:
+            raise AttributeError(
+                f"Module '{module_path}' has no attribute '{class_name}'."
+            )
+        if not (isinstance(cls, type) and issubclass(cls, DistanceMetric)):
+            raise TypeError(
+                f"'{name}' must be a subclass of DistanceMetric."
+            )
+        return cls(**config)
