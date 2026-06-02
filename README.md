@@ -47,6 +47,13 @@ log_feature_names:
   0: rmsd
   4: radius_of_gyration
 
+# --- Skip resampling ---
+# skip_init skips REVO during w_init (iteration ID is None at that point).
+# skip_iterations lists 1-based iteration numbers to skip during a normal run.
+# Recycling still runs on skipped iterations; only the clone/merge loop is bypassed.
+skip_init: false
+skip_iterations: []
+
 # --- Algorithm parameters ---
 pmin: 1.0e-12          # minimum weight floor for the novelty function
 pmax: 0.1              # maximum combined weight allowed for a merge pair

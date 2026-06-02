@@ -88,6 +88,13 @@ def _load_revo_config(config_path=None):
     else:
         config["log_feature_names"] = {}
 
+    skip_iterations = loaded.get("skip_iterations") or []
+    if not isinstance(skip_iterations, (list, tuple)):
+        raise ValueError("'skip_iterations' must be a YAML list of iteration numbers.")
+    config["skip_iterations"] = [int(i) for i in skip_iterations]
+
+    config["skip_init"] = bool(loaded.get("skip_init", False))
+
     if config["importance"] is not None:
         config["importance"] = np.asarray(config["importance"], dtype=float)
 
@@ -128,6 +135,8 @@ class REVODriver(WEDriver):
 
         self._revo_config = _load_revo_config()
         self.LOG_FEATURE_NAMES = self._revo_config["log_feature_names"]
+        self.SKIP_ITERATIONS = self._revo_config["skip_iterations"]
+        self.SKIP_INIT = self._revo_config["skip_init"]
         self.PMIN = self._revo_config["pmin"]
         self.PMAX = self._revo_config["pmax"]
         self.DIST_EXPONENT = self._revo_config["dist_exponent"]
@@ -151,6 +160,20 @@ class REVODriver(WEDriver):
         self._load_config()
         self._recycle_walkers()
         self._check_pre()
+
+        n_iter = westpa.rc.sim_manager.n_iter
+        if n_iter is None and self.SKIP_INIT:
+            westpa.rc.pstatus("REVO: skipping resampling during initialisation")
+            westpa.rc.pflush()
+            self._check_post()
+            self.new_weights = self.new_weights or []
+            return
+        if n_iter is not None and n_iter in self.SKIP_ITERATIONS:
+            westpa.rc.pstatus(f"REVO: skipping resampling for iteration {n_iter}")
+            westpa.rc.pflush()
+            self._check_post()
+            self.new_weights = self.new_weights or []
+            return
 
         for bin in self.next_iter_binning:
             if len(bin) == 0:
